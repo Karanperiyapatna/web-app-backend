@@ -1,2 +1,12 @@
 .media
 .unit_test
+
+
+__pycache__/
+*.pyc
+*.sqlite3
+*.log
+.env
+venv/
+staticfiles/
+media/
