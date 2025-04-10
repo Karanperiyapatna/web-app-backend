@@ -1,0 +1,8 @@
+
+
+
+
+Firewall on server: If using UFW or iptables, allow port 8080:
+sudo ufw allow 8080
+
+
