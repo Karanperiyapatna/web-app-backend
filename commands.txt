@@ -1,6 +1,52 @@
+Installation Commands
 
 
 
+Activate the Envt variable
+
+python3 -m venv venv
+source venv/bin/activate
+deactiavate
+
+Python Installation
+
+
+sudo apt update
+sudo apt install python3 python3-pip python3-venv -y
+
+
+python3 --version
+
+
+
+
+# ----------------------------------------------------------------------------Error
+System check identified no issues (0 silenced).
+
+You have 20 unapplied migration(s). Your project may not work properly until you apply the migrations for app(s): admin, auth, contenttypes, labour_service, sessions.
+Run 'python manage.py migrate' to apply them.
+April 10, 2025 - 13:25:50
+Django version 3.1.12, using settings 'digi_labour.settings'
+Starting development server at http://0.0.0.0:8080/
+Quit the server with CONTROL-C.
+
+
+-----------------------------------------Solution Here
+python manage.py migrate
+
+
+python manage.py makemigrations labour_service
+
+
+
+
+# ---------------------------------------------------------------------------- To run the application
+
+
+python manage.py runserver 0.0.0.0:8080
+
+
+# ---------------------------------------------------------------------------- Activate the Port Access to public
 
 Firewall on server: If using UFW or iptables, allow port 8080:
 sudo ufw allow 8080
