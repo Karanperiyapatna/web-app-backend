@@ -74,7 +74,10 @@ dormant_db = client["dormant_data"]
 
 transactions = client["transactions"]
 subscription_db = client["subscription_data"]
-check_subscription_col = users_db["users_signup"]
+check_subscription_col = users_db["users_data"]
+
+labour_db["labour_signup"]
+labour_credit_claim_col = labour_db['labour_credit_claim']
 
 payment_transactions = transactions["payment_transactions"]
 
@@ -102,8 +105,23 @@ Customer_info_col = subscription_db["users_data"]
 
 user_signup_col = users_db['users_data']  
 agent_signup_col = agent_db["agent_signup"]
+agent_credit_claim_col = agent_db['agent_credit_claim']
 
 dromant_signup_col = dormant_db["partner_signup"]
+
+
+
+#----------------------------------------------------------------- Collection Loopup based on the Labour code
+
+# Global mapping of 2-letter codes to their respective collections
+EMPLOYEE_COLLECTION_MAP = {
+	"BC": EmpBabycaretaker_col,
+	"HP": EmpHelper_col,
+	# Add other mappings here, e.g.:
+	# "CK": EmpCook_col,
+	# "DR": EmpDriver_col,
+}
+
 
 
 # ------------------------------------------------------------------------ Generate 8 Digit Order ID
@@ -121,7 +139,7 @@ def generate_employee_id():
 def generate_agent_id(agent_name, mobile_number):
 	if not agent_name or not mobile_number:
 		return "UNKNOWN"  # Fallback value
-	return (agent_name[:3] + mobile_number[-3:]).upper()
+	return ("AGT" + mobile_number[-3:]  + agent_name[:3]).upper()
 
 
 def generate_employee_id(labour_name, mobile_number, work_header):
@@ -150,57 +168,111 @@ import json
 from django.http import JsonResponse
 from rest_framework.decorators import api_view
 
+
+
+
+from django.utils.dateparse import parse_date
+
 @api_view(['POST'])
-def check_subscription(request):
-    if request.method == "POST":
-        try:
-            # Decode JSON request
-            data = json.loads(request.body.decode("utf-8"))
-            print("Request subscription check data:", data)
+def check_subscription_user(request):
+    print("Requested data for check subscription is:", request.data)  # Log the request data
 
-            mobile_number = data.get("mobile_number")  # Updated key
-            amount = data.get("amount", 0)  # Ensure amount is provided
+    # Get values from the request
+    mobile_number = request.data.get("mobile_number")
+    user_name = request.data.get("username")
+    subscription_type = request.data.get("subscription_type", "plus")  # Default to 'plus' if not provided
+    
+    # Validate required fields
+    if not mobile_number or not user_name:
+        return Response({"error": "Mobile number and username are required."}, status=status.HTTP_400_BAD_REQUEST)
 
-            if not mobile_number:
-                return JsonResponse({"error": "Mobile number is required"}, status=400)
+    # Search for the user in the database
+    user = check_subscription_col.find_one({
+        "mobile_number": mobile_number,
+        "user_name": user_name
+    })
+    print("printing the user for checking subscription :", user)
 
-            # Fetch user details
-            user = check_subscription_col.find_one({"mobile": mobile_number}, {"subscription_status": 1, "credit_points": 1})
+    if not user:
+        return Response({"error": "User not found."}, status=status.HTTP_404_NOT_FOUND)
 
-            if user:
-                subscription_status = int(user.get("subscription_status", 0))  # Convert to int
-                credit_points = int(user.get("credit_points", 0))  # Convert to int
+    # Fetch subscription data
+       # Extract subscription-related fields from user record
+    subscription_status = int(user.get("subscription_status", 0))
+    credit_points = int(user.get("credit_points", 0))
+    start_date = user.get("susbcription_start_date", "NA")  # typo in field: susbcription_...
 
-                # Ensure `amount` is an integer
-                amount = int(amount)
 
-                # Calculate discounted amount
-                discounted_amount = max(0, amount - credit_points)  # Ensure it's not negative
+    if subscription_status == 1 and start_date != "NA":
+        if isinstance(start_date, str):
+            parsed_start = parse_date(start_date)
+        else:
+            parsed_start = start_date
 
-                response_data = {
-                    "mobile_number": mobile_number,
-                    "subscription_status": subscription_status,
-                    "credit_points": credit_points,
-                    "discounted_amount": discounted_amount
-                }
+        if parsed_start:
+            days_passed = (datetime.now().date() - parsed_start).days
+            days_left = max(30 - days_passed, 0)
+        else:
+            days_left = "Unknown"
 
-                print("Fetched subscription details:", response_data)
-                return JsonResponse(response_data, status=200)
-            else:
-                return JsonResponse({"error": "User not found"}, status=404)
+        return Response({
+            "subscription_status": 1,
+            "credit_points": credit_points,
+            "discounted_amount": 0,
+            "days_left": days_left
+        })
 
-        except json.JSONDecodeError:
-            return JsonResponse({"error": "Invalid JSON format"}, status=400)
+    # No active subscription
+    discounted_amount = 50 if subscription_type == 'plus' else 100
 
-        except ValueError as e:
-            print("Error in subscription check:", str(e))
-            return JsonResponse({"error": "Invalid numeric values in request"}, status=400)
+    return Response({
+        "subscription_status": 0,
+        "credit_points": 0,
+        "discounted_amount": discounted_amount,
+        "days_left": 0})
 
-        except Exception as e:
-            print("Error in subscription check:", str(e))
-            return JsonResponse({"error": "Internal Server Error"}, status=500)
 
-    return JsonResponse({"error": "Invalid request method"}, status=400)
+
+@api_view(['POST'])
+def payment_subscription_user(request):
+    print("Requested data for payment check subscription is:", request.data)
+
+    username = request.data.get('username')
+    mobile_number = request.data.get('mobile_number')
+    subscription_type = request.data.get('subscription_type')
+    transaction_id = request.data.get('transaction_id')
+
+    if not all([username, mobile_number, subscription_type, transaction_id]):
+        return Response({'error': 'Missing required fields'}, status=400)
+
+    user = user_signup_col.find_one({'username': username, 'mobile_number': mobile_number})
+
+    if not user:
+        return Response({'error': 'User not found'}, status=404)
+
+    # Calculate subscription duration
+    remaining_days = 30 if subscription_type == 'plus' else 60
+    start_date = datetime.utcnow()
+    end_date = start_date + timedelta(days=remaining_days)
+
+    # Update user subscription in MongoDB
+    user_signup_col.update_one(
+        {'_id': user['_id']},
+        {'$set': {
+            'subscription_type': subscription_type,
+            'subscription_start_date': start_date.strftime('%Y-%m-%d'),
+            'subscription_remaining_day': remaining_days,
+            'transaction_id': transaction_id,
+            'subscription_status': 1  # mark as active
+        }}
+    )
+
+    return Response({
+        'message': 'Subscription updated successfully.',
+        'remaining_days': remaining_days,
+        'transaction_id': transaction_id
+    })
+
 
 
 
@@ -220,8 +292,8 @@ def user_signup(request):
 			"user_id" : generate_user_id(labour_name, mobile_number), 
 			"user_name": data.get("name"),
 			"password": data.get("password"),
-			"mobile": data.get("mobile_number"),
-			"alternative_mobile": data.get("alt_mobile_number"),
+			"mobile_number": data.get("mobile_number"),
+			"alternative_mobile_number": data.get("alt_mobile_number"),
 			"email": data.get("email"),
 			"address": data.get("address"),
 			"city": data.get("city"),
@@ -229,6 +301,10 @@ def user_signup(request):
 			"pincode": data.get("pincode"),
 			"subscription_status" : 0,
 			"credit_points" : 0,
+			"agreed_terms_conditions": data.get("agreeTerms"),
+			"susbcription_type" : data.get("susbcription_type") or "NA",
+			"susbcription_start_date" : data.get("susbcription_start_date") or "NA",
+			"susbcription_remaining_day" : data.get("susbcription_remaining_days") or "NA",
 			
 		}
 		user_signup_col.insert_one(customer)
@@ -260,7 +336,8 @@ def user_login(request):
 			return Response({
 				"message": "Login successful",
 				"user_id": user["user_id"],
-				"name": user["user_name"]
+				"name": user["user_name"],
+				"credit_points" : user["credit_points"],
 			}, status=200)
 		else:
 			return Response({"error": "Invalid credentials"}, status=401)
@@ -268,6 +345,24 @@ def user_login(request):
 	except Exception as e:
 		print("Error in user_login:", str(e))  # Print error message
 		return JsonResponse({"error": "Internal server error"}, status=500)
+	
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+
+@api_view(['GET'])
+def user_subscription_status(request, user_id):
+    try:
+        user = user_signup_col.find_one({"user_id": user_id})
+        if user:
+            return Response({
+                "subscription_status": user.get("subscription_status", 0),
+                "credit_points": user.get("credit_points", 0)
+            }, status=200)
+        else:
+            return Response({"error": "User not found"}, status=404)
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
 	
 
 from django.contrib.auth import logout
@@ -293,6 +388,48 @@ from rest_framework.response import Response
 from rest_framework.decorators import api_view
 from rest_framework import status
 
+
+
+@api_view(['POST'])
+def agent_creditclaim(request):
+	data = request.data
+	print("Agent Credit Claim Amount is :", data)
+
+	# Ensure required fields are present
+	required_fields = ['userId', 'name', 'claimedAmount', 'accountHolder', 'bankName', 'accountNumber', 'ifscCode']
+	for field in required_fields:
+		if field not in data:
+			return Response({'error': f'Missing field: {field}'}, status=status.HTTP_400_BAD_REQUEST)
+
+	# Rename for clarity
+	userId = data['userId']  # Using userId as agent_id
+
+	# Add additional fields
+	data['userId'] = userId
+	data['claimed_at'] = datetime.utcnow()
+	data['process_status'] = 0
+
+	try:
+		# Check if a similar claim already exists
+		existing_claim = agent_credit_claim_col.find_one({
+			'userId': userId,
+			'process_status': {'$in': [0, 777]}
+		})
+
+		if existing_claim:
+			return Response({'message': 'Claim already exists with status 0 or 777'}, status=status.HTTP_200_OK)
+
+		# Insert into MongoDB
+		result = agent_credit_claim_col.insert_one(data)
+		return Response({'message': 'Claim request submitted successfully', 'id': str(result.inserted_id)}, status=status.HTTP_201_CREATED)
+
+	except Exception as e:
+		print("Error inserting data:", e)
+		return Response({'error': 'Failed to submit claim'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+
 @api_view(['POST'])
 def agent_signup(request):
 	data = request.data
@@ -302,8 +439,9 @@ def agent_signup(request):
 	mobile_number = data.get("mobile_number")
 	try:
 		customer = {
-			"user_id" : generate_user_id(labour_name, mobile_number), 
-			"user_name": data.get("name"),
+			"agent_id" : generate_agent_id(labour_name, mobile_number), 
+			"agent_name": data.get("name"),
+			"username" : data.get("username"),
 			"password": data.get("password"),
 			"mobile": data.get("mobile_number"),
 			"alternative_mobile": data.get("alt_mobile_number"),
@@ -314,6 +452,21 @@ def agent_signup(request):
 			"pincode": data.get("pincode"),
 			"subscription_status" : 0,
 			"credit_points" : 0,
+
+			"registered_datetime" : datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+			"process_status": 777,  # after verification, 777 become 1
+			"process_status_result" : "application applied, waiting for approval from company", # Update if have any status result
+			"work_status" : 0,  # 1 means ready to work, 0 means not available
+			"user_credits_consumed" : 0, # change the value as user fetch the mobile number
+			"feedback_credits" : 0, # change the value whenever give stars to labour
+			"labour_rewards": 0, # change the value whenever labour get credits more than 1000rs transaction
+
+			"transaction_credits_consumed" : 0, # concept of 1000rs transaction
+			"comp_transaction_credits_consumed" : 0,  # concept of 50 points from 1000 points
+			"referred_transaction_credits_consumed" : 0, # concept of 
+			"company_end_work_status" : 0, # If they crosses/high demand for this labour - make charge in future
+			"company_end_work_status_reason" : "Still Not yet cross 1000 user_credit_consumed"
+
 			
 		}
 		agent_signup_col.insert_one(customer)
@@ -339,13 +492,25 @@ def agent_login(request):
 			return Response({"error": "Username and password are required"}, status=400)
 
 		# Fetch user from MongoDB and directly compare passwords
-		user = agent_signup_col.find_one({"user_name": username, "password": password}, {"_id": 0})
+		user = agent_signup_col.find_one({"username": username, "password": password})
 
 		if user:
+			print("fetched agent details is :", user)
+
+			user_credits_consumed = user["user_credits_consumed"]
+			referred_transaction_credits_consumed = user["referred_transaction_credits_consumed"]
+			comp_transaction_credits_consumed = user["comp_transaction_credits_consumed"]
+
+			Consumed_Credit_Point = int(user_credits_consumed) + int(referred_transaction_credits_consumed )
+			Total_credit_Point = int(Consumed_Credit_Point - comp_transaction_credits_consumed)
+			print("Agent Total_credit_Point is :", Total_credit_Point)
+
 			return Response({
 				"message": "Login successful",
-				"user_id": user["user_id"],
-				"name": user["user_name"]
+				"user_id": user["agent_id"],
+				"name": user["agent_name"],
+				"user_credits_consumed" : user['user_credits_consumed'],
+				"Total_credit_Point" : Total_credit_Point
 			}, status=200)
 		else:
 			return Response({"error": "Invalid credentials"}, status=401)
@@ -457,13 +622,22 @@ def store_CustomerData(request):
 	print("serach Baby caretaker labour data by User :", data)
 	try:
 		customer = {
-			"username": data.get("username"),
-			"mobile": data.get("mobile"),
+			"user_name": data.get("username"),
+			"mobile_number": data.get("mobile"),
 			"mail_id": data.get("email"),
-			"work_category " : data.get("work_category")
+			"work_category" : data.get("work_category"),
+			'agreedToTerms': data.get("agreedToTerms"),
+			"processed_datetime": datetime.now(), 
+			"fetched_labour_id": data.get("labour_id"),
+			"fetched_labour_name": data.get("labour_name")
+
 		}
-		Customer_info_col.insert_one(customer)
-		return Response({"message": "Customer data stored successfully!"}, status=201)
+		result = Customer_info_col.insert_one(customer)
+		return Response({
+            "message": "Customer data stored successfully!",
+            "_id": str(result.inserted_id)  # send _id back as string
+        }, status=201)
+
 	except Exception as e:
 		return Response({"error": str(e)}, status=500)
 
@@ -587,6 +761,106 @@ def requirement_helper(request):
 			return Response({'message': 'Form submitted successfully!'}, status=status.HTTP_201_CREATED)
 		else:
 			return Response({'message': 'Error saving to MongoDB'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+@api_view(['POST'])
+def labour_login(request):
+	if request.method == 'POST':
+		print("Request labour data is:", request.data)
+
+		print("Request labour data is:", request.data)
+		username = request.data.get('username')
+		password = request.data.get('password')
+		service_category = request.data.get('service_category')
+
+		if not username or not password:
+			return Response({"error": "Username and password are required"}, status=400)
+		
+		if service_category == "babycaretaker":
+			labour_login_col = EmpBabycaretaker_col
+		elif service_category == "eldercaretaker":
+			labour_login_col = EmpElderCaretaker_col
+		else:
+			print("no labour collection found for login")
+			return Response({'message': 'Invalid service category'}, status=status.HTTP_400_BAD_REQUEST)
+
+		# Fetch user from MongoDB and directly compare passwords
+		user = labour_login_col.find_one({"username": username, "password": password}, {"_id": 0})
+
+		if user:
+			user_credits_consumed = user["user_credits_consumed"]
+			referred_transaction_credits_consumed = user["referred_transaction_credits_consumed"]
+			comp_transaction_credits_consumed = user["comp_transaction_credits_consumed"]
+
+			Consumed_Credit_Point = int(user_credits_consumed) + int(referred_transaction_credits_consumed )
+			Total_credit_Point = int(Consumed_Credit_Point - comp_transaction_credits_consumed)
+
+			return Response({
+				"message": "Login successful",
+				"labour_id": user["labour_id"],
+				"labour_name": user["labour_name"],
+				"user_credits_consumed" : user["user_credits_consumed"],
+				"referred_transaction_credits_consumed" : user["referred_transaction_credits_consumed"], 
+				"Total_credit_Point" : Total_credit_Point
+			}, status=200)
+		else:
+			return Response({"error": "Invalid credentials"}, status=401)
+
+
+
+
+@api_view(['POST'])
+def labour_logout(request):
+	if request.method == 'POST':
+			
+		logout(request)  # Logs out user
+		response = JsonResponse({"message": "Logout successful!"})
+		response.delete_cookie('sessionid')  # Remove session ID cookie
+		response.delete_cookie('csrftoken')  # Remove CSRF token if stored in cookies
+		request.session.flush()  # Clear the session completely
+		return response
+	return JsonResponse({"error": "Invalid request"}, status=400)
+
+
+
+@api_view(['POST'])
+def labour_creditclaim(request):
+	data = request.data
+	print("Agent Credit Claim Amount is :", data)
+
+	# Ensure required fields are present
+	required_fields = ['userId', 'name', 'claimedAmount', 'accountHolder', 'bankName', 'accountNumber', 'ifscCode']
+	for field in required_fields:
+		if field not in data:
+			return Response({'error': f'Missing field: {field}'}, status=status.HTTP_400_BAD_REQUEST)
+
+	# Rename for clarity
+	userId = data['userId']  # Using userId as agent_id
+
+	# Add additional fields
+	data['userId'] = userId
+	data['claimed_at'] = datetime.utcnow()
+	data['process_status'] = 0
+
+	try:
+		# Check if a similar claim already exists
+		existing_claim = agent_credit_claim_col.find_one({
+			'userId': userId,
+			'process_status': {'$in': [0, 777]}
+		})
+
+		if existing_claim:
+			return Response({'message': 'Claim already exists with status 0 or 777'}, status=status.HTTP_200_OK)
+
+		# Insert into MongoDB
+		result = agent_credit_claim_col.insert_one(data)
+		return Response({'message': 'Claim request submitted successfully', 'id': str(result.inserted_id)}, status=status.HTTP_201_CREATED)
+
+	except Exception as e:
+		print("Error inserting data:", e)
+		return Response({'error': 'Failed to submit claim'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 
 
@@ -716,17 +990,35 @@ def search_babycare(request):
 			query = {
 				"gender": gender,
 				"city": city,
-				"working_area": area
+				"work_area": area
 			}
 			print("babycaretaker labour search query is :", query)
 
 			# Fetch data from MongoDB
-			labours = list(EmpBabycaretaker_col.find(query, {"labour_name": 1, "gender": 1, "age": 1, "experience" : 1 }))
+			labours = list(EmpBabycaretaker_col.find(query, {
+					"_id" :1,
+					"labour_name": 1, 
+					"gender": 1, 
+					"age": 1, 
+					"experience" : 1 , 
+					"mobile_number" : 1, 
+					"photo_path" : 1,
+					"labour_id" : 1,
+					"register_via": 1,
+					"referred_by_agent": 1,
+					"referred_by_labour": 1 }))
 
 			# Convert ObjectId to string for JSON serialization
 			for labour in labours:
 				if '_id' in labour:
 					labour['_id'] = str(labour['_id'])
+
+				# Determine who referred them, if any
+				labour["referred_by"] = labour.get("referred_by_agent") or labour.get("referred_by_labour") or "N/A"
+
+				# Clean up unused fields if needed
+				labour.pop("referred_by_agent", None)
+				labour.pop("referred_by_labour", None)
 
 			print("fetched and passing babycaretaker labour details is :", labours)
 
@@ -741,6 +1033,125 @@ def search_babycare(request):
 	return JsonResponse({"error": "Invalid request"}, status=400)
 
 
+
+@api_view(["POST"])
+def payment_update(request):
+    if request.method == "POST":
+        try:
+            data = json.loads(request.body.decode("utf-8"))
+            print("Payment update received:", data)
+
+            _id = data.get("_id")
+            price = data.get("price")
+            discount = data.get("discount")
+            final_price = data.get("final_price")
+            register_via = data.get("register_via")
+            referred_by = data.get("referred_by")
+
+            if not _id:
+                return JsonResponse({"error": "Missing _id field"}, status=400)
+
+            object_id = ObjectId(_id)
+
+            # Step 1: Update the customer document
+            update_result = Customer_info_col.update_one(
+                {"_id": object_id},
+                {
+                    "$set": {
+                        "price": price,
+                        "discount": discount,
+                        "final_price": final_price,
+                        "register_via": register_via,
+                        "referred_by": referred_by,
+                        "payment_updated_at": datetime.now()
+                    }
+                }
+            )
+
+            if update_result.matched_count == 0:
+                return JsonResponse({"error": "No record found with provided _id"}, status=404)
+
+            # Step 2: Fetch the updated customer document
+            customer_data = Customer_info_col.find_one({"_id": object_id})
+            print("Updated Customer Info:", customer_data)
+			
+			# Convert ObjectId to string for JSON serialization
+			# Fetching from the Subcription - user_data collection and updating with respect to the labour and then Agent or Labour
+            customer_data["_id"] = str(customer_data["_id"])
+
+            work_category = customer_data.get("work_category")
+            labour_id = customer_data.get("fetched_labour_id")
+            referred_by = customer_data.get("referred_by")
+            register_via = customer_data.get("register_via")
+
+            # Step 3: Identify correct labour collection
+            labour_col = None
+            if work_category == "Baby Caretaker":
+                labour_col = EmpBabycaretaker_col
+            elif work_category == "Elder Caretaker":
+                labour_col = EmpElderCaretaker_col
+            # Add more categories as needed
+            else:
+                return JsonResponse({"error": f"Unsupported work_category: {work_category}"}, status=400)
+
+            # Step 4: Update the matched labour document
+            labour_update = labour_col.update_one(
+                {"labour_id": labour_id},
+                {
+					"$inc": {
+						"transaction_credits_consumed": price,
+						"user_credits_consumed": 1
+					}}
+            )
+
+            if labour_update.matched_count == 0:
+                return JsonResponse({"error": "No labour found with provided labour_id"}, status=404)
+
+			# Step 5: Handle 'register_via' logic
+            if register_via == "Via Agent":
+                agent_update = agent_signup_col.update_one(
+					{"agent_id": referred_by},
+					{"$inc": {"user_credits_consumed" : 1, "transaction_credits_consumed": price}}
+				)
+                if agent_update.matched_count == 0:
+                    print(f"Agent with ID {referred_by} not found in agent_db.")
+
+            elif register_via == "Via Labour":
+				 # Step 3: Identify correct labour collection
+                labour_col = None
+                if work_category == "Baby Caretaker":
+                    labour_col = EmpBabycaretaker_col
+                elif work_category == "Elder Caretaker":
+                    labour_col = EmpElderCaretaker_col
+				# Add more categories as needed
+                else:
+                    return JsonResponse({"error": f"Unsupported work_category: {work_category}"}, status=400)
+
+                labour_ref_update = labour_col.update_one(
+					{"labour_id": referred_by},
+					{"$inc": {"user_credits_consumed" : 1, "transaction_credits_consumed": price}}
+				)
+                if labour_ref_update.matched_count == 0:
+                    print(f"Labour with ID {referred_by} not found in labour_db.")
+
+            elif register_via == "Direct":
+                print("Direct registration — no referral update needed.")
+
+            else:
+                print(f"Unexpected register_via value: {register_via}")
+				
+            return JsonResponse({
+                "message": "Payment details updated successfully and labour credits consumed updated",
+                "customer": customer_data
+            }, status=200)
+
+        except json.JSONDecodeError:
+            return JsonResponse({"error": "Invalid JSON format"}, status=400)
+        except Exception as e:
+            print("Error during payment update:", str(e))
+            return JsonResponse({"error": str(e)}, status=500)
+
+    return JsonResponse({"error": "Invalid request method"}, status=400)
 	
 #  Baby Care Taker Requirements Code
 
@@ -773,10 +1184,12 @@ def requirement_babycaretaker(request):
 			"preferred_priority": request.data.get("urgencyStatus"),
 			"preferred_care_timings" : request.data.get("preferredCareTime"),
 			"preferred_duration": request.data.get("requiredDuration"),
+			"preferredgender" : request.data.get("preferredGender"),
 
 			"preferred_task": [item.strip() for item in request.data.get("baby_care_tasks", "").split(",")],  # Store as array
 			"additional_note": request.data.get("additionalNotes"),
 			"salary_offered": request.data.get("salaryOffered"),
+			'agreedToTerms': request.data.get("agreedToTerms"),
 		}
 
 		# Insert into MongoDB
@@ -805,8 +1218,7 @@ def emp_baby_caretaker(request):
 
 		base_upload_dir = os.path.join(settings.MEDIA_ROOT, "uploads")
 		folder_path = os.path.join(base_upload_dir, sequence_id)
-		os.makedirs(folder_path, exist_ok=True)  # Ensure the folder exists
-
+		os.makedirs(folder_path, exist_ok=True) 
 
 		if photo:
 			photo_name = f"{sequence_id}_{photo.name}"
@@ -848,20 +1260,58 @@ def emp_baby_caretaker(request):
 			"language": [lang.strip() for lang in request.data.get("language", "").split(",")],  # Store languages as array
 			"charge_per_hour": int(request.data.get("hourlyRate", 0)),
 			"experience": request.data.get("Experience"),
+			"agreed_terms_conditions": request.data.get("agreedToTerms"),
+
 			"register_via" : request.data.get("refer"),
-			"reference_id" : request.data.get("extraId"),
+			"referred_by_agent" : request.data.get("agentId"),
+			"referred_by_labour" : request.data.get("labourId"),
+
 			"work_specialization": request.data.get("workdescription"),
 			"registered_datetime" : datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
 			"process_status": 777,  # after verification, 777 become 1
-			"process_status_result" : "application applied, waiting for approval", # Update if have any status result
+			"process_status_result" : "application applied, waiting for approval from company", # Update if have any status result
 			"work_status" : 1,  # 1 means ready to work, 0 means not available
 			"user_credits_consumed" : 0, # change the value as user fetch the mobile number
 			"feedback_credits" : 0, # change the value whenever give stars to labour
+			"labour_rewards": 0, # change the value whenever labour get credits more than 1000rs transaction
+
+			"transaction_credits_consumed" : 0, # concept of 1000rs transaction
+			"comp_transaction_credits_consumed" : 0,  # concept of 50 points from 1000 points
+			"referred_transaction_credits_consumed" : 0, # concept of 
+			"company_end_work_status" : 1, # If they crosses/high demand for this labour - make charge in future
+			"company_end_work_status_reason" : "Still Not yet cross 1000 user_credit_consumed"
 
 		}
 
 		# Insert into MongoDB
 		result = EmpBabycaretaker_col.insert_one(emp_caretaker_data)
+
+
+
+		if result.inserted_id:
+
+			referred_by = request.data.get("agentId", "").strip()
+			# Extract last two letters for service code (e.g., 'L123BC' -> 'BC')
+			service_code = referred_by[-2:] if len(referred_by) >= 2 else ""
+
+			referred_by = request.data.get("agentId", "")
+			
+			if referred_by.startswith("AGT"):
+				agent_signup_col.update_one(
+					{"agent_id": referred_by},
+					{"$inc": {"referred_transaction_credits_consumed": 10}}
+				)
+			elif referred_by.startswith("L") and service_code in EMPLOYEE_COLLECTION_MAP:
+				# Referred by labour and valid service code
+				collection = EMPLOYEE_COLLECTION_MAP[service_code]
+				collection.update_one(
+					{"labour_id": referred_by},
+					{"$inc": {"referred_transaction_credits_consumed": 10}}
+				)
+				
+			return Response({'message': 'Form submitted successfully!'}, status=status.HTTP_201_CREATED)
+		else:
+			return Response({'message': 'Error saving to MongoDB'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 		if result.inserted_id:
 			return Response({'message': 'Form submitted successfully!'}, status=status.HTTP_201_CREATED)
@@ -883,13 +1333,13 @@ def search_eldercare(request):
 			print("request labour data for baby caretaker :", data)
 
 			gender = data.get("gender")
-			careLocation = data.get("careLocation")  # Get city
+			city = data.get("city")  # Get city
 			area = data.get("area")  # Get area
 
 			# Ensure required fields are present
 			if not gender:
 				return JsonResponse({"error": "Gender is required"}, status=400)
-			if not careLocation:
+			if not city:
 				return JsonResponse({"error": "City is required"}, status=400)
 			if not area:
 				return JsonResponse({"error": "Area is required"}, status=400)
@@ -897,7 +1347,7 @@ def search_eldercare(request):
 			# MongoDB Query
 			query = {
 				"gender": gender,
-				"city": careLocation,
+				"city": city,
 				"working_area": area
 			}
 			print("babycaretaker labour search query is :", query)
